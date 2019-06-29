@@ -46,10 +46,6 @@ var rateLimitTier3 = time.Tick(time.Minute / 50)
 func init() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.Ldate | log.Ltime)
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
 	flag.StringVar(&config.Team.Channel, "channel", "", "channel name (without '#')")
 	flag.StringVar(&config.Team.Token, "token", os.Getenv("SLACK_API_TOKEN1"), "API token")
 	flag.StringVar(&config.Path, "config", "slack-wipe.json", "")
