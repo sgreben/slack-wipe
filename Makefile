@@ -1,4 +1,4 @@
-VERSION = 0.0.2
+VERSION = 0.0.3
 
 APP      := slack-wipe
 PACKAGES := $(shell go list -f {{.Dir}} ./...)

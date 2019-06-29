@@ -21,8 +21,7 @@ type teamState struct {
 	ChannelID    string
 	User         string
 	UserID       string
-	Messages     []slack.Message
-	UserMessages []slack.Message
+	UserMessages []slack.SearchMessage
 	UserFiles    []slack.File
 }
 
@@ -89,7 +88,7 @@ func fetchAndWipeMessages() {
 	if err := team.fetchMessages(); err != nil {
 		log.Fatalf("fetch messages for channel %q: %v", team.Channel, err)
 	}
-	log.Printf("fetched %d own messages (%d total)", len(team.UserMessages), len(team.Messages))
+	log.Printf("fetched %d own messages", len(team.UserMessages))
 	if !config.AutoApprove {
 		if !approvalPrompt(fmt.Sprintf("wipe all %d messages?", len(team.UserMessages))) {
 			log.Fatalf("aborted")
@@ -178,28 +177,29 @@ func (t *Team) fetchUserInfo() error {
 
 func (t *Team) fetchMessages() error {
 	first := true
-	cursor := ""
-	var messages []slack.Message
-	for first || cursor != "" {
+	var messages []slack.SearchMessage
+	params := slack.NewSearchParameters()
+	pageMax := 1
+	for first || params.Page <= pageMax {
 		first = false
 		<-rateLimitTier3
-		history, err := t.RTM.GetConversationHistory(&slack.GetConversationHistoryParameters{
-			ChannelID: t.ChannelID,
-			Cursor:    cursor,
-		})
-		cursor = history.ResponseMetaData.NextCursor
+		resp, err := t.RTM.SearchMessages(
+			fmt.Sprintf("in:#%s from:@%s", t.Channel, t.UserID),
+			params,
+		)
 		if err != nil {
 			return err
 		}
-		messages = append(messages, history.Messages...)
+		messages = append(messages, resp.Matches...)
+		pageMax = resp.PageCount
+		params.Page++
 	}
-	var userMessages []slack.Message
+	var userMessages []slack.SearchMessage
 	for _, m := range messages {
 		if m.User == t.UserID {
 			userMessages = append(userMessages, m)
 		}
 	}
-	t.Messages = messages
 	t.UserMessages = userMessages
 	return nil
 }
