@@ -81,35 +81,45 @@ func main() {
 		log.Fatalf("fetch user info: %v", err)
 	}
 	if config.WipeMessages {
-		if err := team.fetchMessages(); err != nil {
-			log.Fatalf("fetch messages for channel %q: %v", team.Channel, err)
-		}
-		log.Printf("fetched %d own messages (%d total)", len(team.UserMessages), len(team.Messages))
-		if !config.AutoApprove {
-			if !approvalPrompt(fmt.Sprintf("wipe all %d messages?", len(team.UserMessages))) {
-				log.Fatalf("aborted")
-			}
-		}
-		if err := team.wipeUserMessages(); err != nil {
-			log.Fatalf("wipe messages: %v", err)
-		}
-		log.Print("wiped messages")
+		fetchAndWipeMessages()
 	}
 	if config.WipeFiles {
-		if err := team.fetchFiles(); err != nil {
-			log.Fatalf("fetch files for channel %q: %v", team.Channel, err)
-		}
-		log.Printf("fetched %d own files", len(team.UserFiles))
-		if !config.AutoApprove {
-			if !approvalPrompt(fmt.Sprintf("wipe all %d files?", len(team.UserFiles))) {
-				log.Fatalf("aborted")
-			}
-		}
-		if err := team.wipeUserFiles(); err != nil {
-			log.Fatalf("wipe files: %v", err)
-		}
-		log.Print("wiped files")
+		fetchAndWipeFiles()
 	}
+}
+
+func fetchAndWipeMessages() {
+	team := &config.Team
+	if err := team.fetchMessages(); err != nil {
+		log.Fatalf("fetch messages for channel %q: %v", team.Channel, err)
+	}
+	log.Printf("fetched %d own messages (%d total)", len(team.UserMessages), len(team.Messages))
+	if !config.AutoApprove {
+		if !approvalPrompt(fmt.Sprintf("wipe all %d messages?", len(team.UserMessages))) {
+			log.Fatalf("aborted")
+		}
+	}
+	if err := team.wipeUserMessages(); err != nil {
+		log.Fatalf("wipe messages: %v", err)
+	}
+	log.Print("wiped messages")
+}
+
+func fetchAndWipeFiles() {
+	team := &config.Team
+	if err := team.fetchFiles(); err != nil {
+		log.Fatalf("fetch files for channel %q: %v", team.Channel, err)
+	}
+	log.Printf("fetched %d own files", len(team.UserFiles))
+	if !config.AutoApprove {
+		if !approvalPrompt(fmt.Sprintf("wipe all %d files?", len(team.UserFiles))) {
+			log.Fatalf("aborted")
+		}
+	}
+	if err := team.wipeUserFiles(); err != nil {
+		log.Fatalf("wipe files: %v", err)
+	}
+	log.Print("wiped files")
 }
 
 func approvalPrompt(prompt string) bool {
