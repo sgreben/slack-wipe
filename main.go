@@ -135,6 +135,7 @@ func lookUpChannelID(channelName string) error {
 			Cursor:          cursor,
 			Types:           []string{"private_channel", "public_channel", "mpim", "im"},
 			ExcludeArchived: "false",
+			Limit:           1000,
 		})
 		if err != nil {
 			return err
@@ -164,8 +165,9 @@ func fetchUserInfo() error {
 
 func fetchMessages() error {
 	params := slack.NewSearchParameters()
+	params.Count = 100
 	query := fmt.Sprintf("in:#%s from:@%s", config.Channel, state.UserID)
-	<-rateLimitTier3
+	<-rateLimitTier2
 	resp, err := state.RTM.SearchMessages(query, params)
 	if err != nil {
 		return err
@@ -176,7 +178,7 @@ func fetchMessages() error {
 	bar := progressbar.NewOptions(pageMax, progressbar.OptionSetDescription("fetching messages"))
 	bar.Add(1)
 	for params.Page <= pageMax {
-		<-rateLimitTier3
+		<-rateLimitTier2
 		resp, err := state.RTM.SearchMessages(query, params)
 		if err != nil {
 			return err
@@ -200,6 +202,7 @@ func fetchMessages() error {
 
 func fetchFiles() error {
 	params := slack.NewGetFilesParameters()
+	params.Count = 200
 	params.User = state.UserID
 	params.Channel = state.ChannelID
 	<-rateLimitTier3
