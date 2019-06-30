@@ -8,7 +8,11 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
+
+	"golang.org/x/text/runes"
 
 	"github.com/nlopes/slack"
 	"github.com/schollz/progressbar"
@@ -21,6 +25,8 @@ var config struct {
 	WipeFiles    bool
 	Path         string `json:"-"`
 	AutoApprove  bool
+	Redact       bool
+	RedactMarker rune
 }
 
 var state struct {
@@ -37,6 +43,7 @@ var rateLimitTier3 = time.Tick(time.Minute / 50)
 var rateLimitTier2 = time.Tick(time.Minute / 20)
 
 func init() {
+	config.RedactMarker = '█'
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.Ldate | log.Ltime)
 	flag.StringVar(&config.Channel, "channel", "", "channel name (without '#')")
@@ -45,6 +52,7 @@ func init() {
 	flag.BoolVar(&config.WipeMessages, "messages", false, "wipe messages")
 	flag.BoolVar(&config.WipeFiles, "files", false, "wipe files")
 	flag.BoolVar(&config.AutoApprove, "auto-approve", false, "do not ask for confirmation")
+	flag.BoolVar(&config.Redact, "redact", false, "redact messages (instead of delete)")
 	flag.Parse()
 
 	f, err := os.Open(config.Path)
@@ -86,16 +94,26 @@ func main() {
 }
 
 func fetchAndWipeMessages() {
+	verb := "delete"
+	if config.Redact {
+		verb = "redact"
+	}
 	if err := fetchMessages(); err != nil {
 		log.Fatalf("fetch messages for channel %q: %v", config.Channel, err)
 	}
 	if !config.AutoApprove {
-		if !approvalPrompt(fmt.Sprintf("wipe all %d messages?", len(state.UserMessages))) {
+		if !approvalPrompt(fmt.Sprintf("%s all %d messages?", verb, len(state.UserMessages))) {
 			log.Fatalf("aborted")
 		}
 	}
-	if err := wipeUserMessages(); err != nil {
-		log.Fatalf("wipe messages: %v", err)
+	if config.Redact {
+		if err := redactAllUserMessages(); err != nil {
+			log.Fatalf("redact messages: %v", err)
+		}
+		return
+	}
+	if err := deleteAllUserMessages(); err != nil {
+		log.Fatalf("delete messages: %v", err)
 	}
 }
 
@@ -108,7 +126,7 @@ func fetchAndWipeFiles() {
 			log.Fatalf("aborted")
 		}
 	}
-	if err := wipeUserFiles(); err != nil {
+	if err := deleteAllUserFiles(); err != nil {
 		log.Fatalf("wipe files: %v", err)
 	}
 }
@@ -236,17 +254,24 @@ func fetchFiles() error {
 	return nil
 }
 
-func wipeUserMessages() error {
+func deleteAllUserMessages() error {
 	var errors []error
 	bar := progressbar.NewOptions(len(state.UserMessages), progressbar.OptionSetDescription("wiping messages"))
 	bar.RenderBlank()
+	var wg sync.WaitGroup
+	wg.Add(len(state.UserMessages))
 	for _, m := range state.UserMessages {
-		bar.Add(1)
-		<-rateLimitTier3
-		if _, _, err := state.RTM.DeleteMessage(state.ChannelID, m.Timestamp); err != nil {
-			errors = append(errors, err)
-		}
+		timestamp := m.Timestamp
+		go func() {
+			defer wg.Done()
+			defer bar.Add(1)
+			<-rateLimitTier3
+			if _, _, err := state.RTM.DeleteMessage(state.ChannelID, timestamp); err != nil {
+				errors = append(errors, err)
+			}
+		}()
 	}
+	wg.Wait()
 	bar.Finish()
 	fmt.Println()
 	if len(errors) > 0 {
@@ -255,7 +280,7 @@ func wipeUserMessages() error {
 	return nil
 }
 
-func wipeUserFiles() error {
+func deleteAllUserFiles() error {
 	var errors []error
 	bar := progressbar.NewOptions(len(state.UserFiles), progressbar.OptionSetDescription("wiping files"))
 	bar.RenderBlank()
@@ -273,3 +298,41 @@ func wipeUserFiles() error {
 	}
 	return nil
 }
+
+func redactAllUserMessages() error {
+	var errors []error
+	bar := progressbar.NewOptions(len(state.UserMessages), progressbar.OptionSetDescription("redact messages"))
+	bar.RenderBlank()
+	var wg sync.WaitGroup
+	wg.Add(len(state.UserMessages))
+	for _, m := range state.UserMessages {
+		timestamp := m.Timestamp
+		redacted := redact(m.Text)
+		go func() {
+			defer wg.Done()
+			defer bar.Add(1)
+			<-rateLimitTier3
+			if _, _, _, err := state.RTM.UpdateMessage(state.ChannelID, timestamp, redacted); err != nil {
+				errors = append(errors, err)
+			}
+		}()
+	}
+	wg.Wait()
+	bar.Finish()
+	fmt.Println()
+	if len(errors) > 0 {
+		return fmt.Errorf("%d errors (e.g. %v)", len(errors), errors[0])
+	}
+	return nil
+}
+
+var (
+	spaceRunes        = runes.In(unicode.Space)
+	redactTransformer = runes.Map(func(r rune) rune {
+		if spaceRunes.Contains(r) {
+			return r
+		}
+		return config.RedactMarker
+	})
+	redact = redactTransformer.String
+)

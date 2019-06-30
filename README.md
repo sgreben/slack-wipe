@@ -2,6 +2,14 @@
 
 Deletes all your messages and/or files in a single Slack channel.
 
+Alternatively, if you specify `-redact` mode, it edits all messages, replacing all non-space characters with `█`:
+
+```text
+redact mode test
+██████ ████ ████
+```
+
+
 ## Usage
 
 ```sh
@@ -18,6 +26,8 @@ Usage of slack-wipe:
         wipe messages (default false)
   -files
         wipe files (default false)
+  -redact
+        redact messages (instead of delete) (default false)
   -auto-approve
         do not ask for confirmation (default false)
   -config string
