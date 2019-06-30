@@ -30,6 +30,8 @@ Usage of slack-wipe:
 
 ## Config schema
 
+Put this in a `slack-wipe.json` to avoid having to type out token/channel info on the command line:
+
 ```json
 {
     "Channel":  "channelname",
