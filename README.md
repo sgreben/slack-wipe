@@ -2,12 +2,10 @@
 
 Deletes all your messages and/or files in a single Slack channel.
 
-_NB. code quality = "quick hack". Might clean it up later._
-
 ## Usage
 
 ```sh
-$ slack-wipe -token=API_TOKEN -channel=CHANNEL_NAME -messages=true -files=true
+$ slack-wipe -token=API_TOKEN -channel=CHANNEL_NAME -messages -files
 ```
 
 ```
@@ -17,7 +15,7 @@ Usage of slack-wipe:
   -channel string
         channel name (without '#')
   -messages
-        wipe messages (default true)
+        wipe messages (default false)
   -files
         wipe files (default false)
   -auto-approve

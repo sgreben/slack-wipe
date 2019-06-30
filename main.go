@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"os"
 	"strings"
@@ -15,7 +14,16 @@ import (
 	"github.com/schollz/progressbar"
 )
 
-type teamState struct {
+var config struct {
+	Channel      string
+	Token        string
+	WipeMessages bool
+	WipeFiles    bool
+	Path         string `json:"-"`
+	AutoApprove  bool
+}
+
+var state struct {
 	API          *slack.Client
 	RTM          *slack.RTM
 	ChannelID    string
@@ -25,30 +33,16 @@ type teamState struct {
 	UserFiles    []slack.File
 }
 
-type Team struct {
-	Channel string
-	Token   string
-	teamState
-}
-
-var config struct {
-	Team
-	WipeMessages bool
-	WipeFiles    bool
-	Quiet        bool
-	Path         string `json:"-"`
-	AutoApprove  bool
-}
-
 var rateLimitTier3 = time.Tick(time.Minute / 50)
+var rateLimitTier2 = time.Tick(time.Minute / 20)
 
 func init() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.Ldate | log.Ltime)
-	flag.StringVar(&config.Team.Channel, "channel", "", "channel name (without '#')")
-	flag.StringVar(&config.Team.Token, "token", os.Getenv("SLACK_API_TOKEN1"), "API token")
+	flag.StringVar(&config.Channel, "channel", "", "channel name (without '#')")
+	flag.StringVar(&config.Token, "token", "", "API token")
 	flag.StringVar(&config.Path, "config", "slack-wipe.json", "")
-	flag.BoolVar(&config.WipeMessages, "messages", true, "wipe messages")
+	flag.BoolVar(&config.WipeMessages, "messages", false, "wipe messages")
 	flag.BoolVar(&config.WipeFiles, "files", false, "wipe files")
 	flag.BoolVar(&config.AutoApprove, "auto-approve", false, "do not ask for confirmation")
 	flag.Parse()
@@ -61,20 +55,28 @@ func init() {
 		}
 	}
 
-	if config.Quiet {
-		log.SetOutput(ioutil.Discard)
+	if config.Channel == "" {
+		log.Fatalf("-channel is required")
+	}
+	if config.Token == "" {
+		log.Fatalf("-token is required")
 	}
 }
 
 func main() {
-	team := &config.Team
-	team.init()
-	if err := team.fetchChannelID(); err != nil {
-		log.Fatalf("fetch channel info for channel %q: %v", team.Channel, err)
+	state.API = slack.New(config.Token)
+	state.RTM = state.API.NewRTM()
+	go state.RTM.ManageConnection()
+	log.Printf("looking up channel ID for %q", config.Channel)
+	if err := lookUpChannelID(config.Channel); err != nil {
+		log.Fatalf("fetch channel info for channel %q: %v", config.Channel, err)
 	}
-	if err := team.fetchUserInfo(); err != nil {
+	log.Printf("channel ID: %s", state.ChannelID)
+	log.Printf("looking up user for token %s...%s", config.Token[:8], config.Token[len(config.Token)-9:])
+	if err := fetchUserInfo(); err != nil {
 		log.Fatalf("fetch user info: %v", err)
 	}
+	log.Printf("user: @%s (@%s)", state.User, state.UserID)
 	if config.WipeMessages {
 		fetchAndWipeMessages()
 	}
@@ -84,37 +86,31 @@ func main() {
 }
 
 func fetchAndWipeMessages() {
-	team := &config.Team
-	if err := team.fetchMessages(); err != nil {
-		log.Fatalf("fetch messages for channel %q: %v", team.Channel, err)
+	if err := fetchMessages(); err != nil {
+		log.Fatalf("fetch messages for channel %q: %v", config.Channel, err)
 	}
-	log.Printf("fetched %d own messages", len(team.UserMessages))
 	if !config.AutoApprove {
-		if !approvalPrompt(fmt.Sprintf("wipe all %d messages?", len(team.UserMessages))) {
+		if !approvalPrompt(fmt.Sprintf("wipe all %d messages?", len(state.UserMessages))) {
 			log.Fatalf("aborted")
 		}
 	}
-	if err := team.wipeUserMessages(); err != nil {
+	if err := wipeUserMessages(); err != nil {
 		log.Fatalf("wipe messages: %v", err)
 	}
-	log.Print("wiped messages")
 }
 
 func fetchAndWipeFiles() {
-	team := &config.Team
-	if err := team.fetchFiles(); err != nil {
-		log.Fatalf("fetch files for channel %q: %v", team.Channel, err)
+	if err := fetchFiles(); err != nil {
+		log.Fatalf("fetch files for channel %q: %v", config.Channel, err)
 	}
-	log.Printf("fetched %d own files", len(team.UserFiles))
 	if !config.AutoApprove {
-		if !approvalPrompt(fmt.Sprintf("wipe all %d files?", len(team.UserFiles))) {
+		if !approvalPrompt(fmt.Sprintf("wipe all %d files?", len(state.UserFiles))) {
 			log.Fatalf("aborted")
 		}
 	}
-	if err := team.wipeUserFiles(); err != nil {
+	if err := wipeUserFiles(); err != nil {
 		log.Fatalf("wipe files: %v", err)
 	}
-	log.Print("wiped files")
 }
 
 func approvalPrompt(prompt string) bool {
@@ -128,24 +124,16 @@ func approvalPrompt(prompt string) bool {
 	return answer == "yes"
 }
 
-func (t *Team) init() {
-	if t.Token == "" {
-		log.Fatalf("-token is required")
-	}
-	t.API = slack.New(t.Token)
-	t.RTM = t.API.NewRTM()
-	go t.RTM.ManageConnection()
-}
-
-func (t *Team) fetchChannelID() error {
+func lookUpChannelID(channelName string) error {
 	var channels []slack.Channel
 	first := true
 	cursor := ""
 	for first || cursor != "" {
 		first = false
-		moreChannels, nextCursor, err := t.RTM.GetConversations(&slack.GetConversationsParameters{
+		<-rateLimitTier2
+		moreChannels, nextCursor, err := state.RTM.GetConversations(&slack.GetConversationsParameters{
 			Cursor:          cursor,
-			Types:           []string{"private_channel", "public_channel"},
+			Types:           []string{"private_channel", "public_channel", "mpim", "im"},
 			ExcludeArchived: "false",
 		})
 		if err != nil {
@@ -155,67 +143,80 @@ func (t *Team) fetchChannelID() error {
 		cursor = nextCursor
 	}
 	for _, c := range channels {
-		nameMatches := c.Name == t.Channel
-		idMatches := c.ID == t.Channel
-		if nameMatches || idMatches {
-			t.ChannelID = c.ID
+		if c.Name == channelName {
+			state.ChannelID = c.ID
 			return nil
 		}
 	}
-	return fmt.Errorf("channel not found: %q", t.Channel)
+	return fmt.Errorf("channel not found: %q", channelName)
 }
 
-func (t *Team) fetchUserInfo() error {
-	identity, err := t.RTM.AuthTest()
+func fetchUserInfo() error {
+	<-rateLimitTier3
+	identity, err := state.RTM.AuthTest()
 	if err != nil {
 		return err
 	}
-	t.User = identity.User
-	t.UserID = identity.UserID
+	state.User = identity.User
+	state.UserID = identity.UserID
 	return nil
 }
 
-func (t *Team) fetchMessages() error {
-	first := true
-	var messages []slack.SearchMessage
+func fetchMessages() error {
 	params := slack.NewSearchParameters()
-	pageMax := 1
-	for first || params.Page <= pageMax {
-		first = false
+	query := fmt.Sprintf("in:#%s from:@%s", config.Channel, state.UserID)
+	<-rateLimitTier3
+	resp, err := state.RTM.SearchMessages(query, params)
+	if err != nil {
+		return err
+	}
+	messages := resp.Matches
+	pageMax := resp.PageCount
+	params.Page++
+	bar := progressbar.NewOptions(pageMax, progressbar.OptionSetDescription("fetching messages"))
+	bar.Add(1)
+	for params.Page <= pageMax {
 		<-rateLimitTier3
-		resp, err := t.RTM.SearchMessages(
-			fmt.Sprintf("in:#%s from:@%s", t.Channel, t.UserID),
-			params,
-		)
+		resp, err := state.RTM.SearchMessages(query, params)
 		if err != nil {
 			return err
 		}
 		messages = append(messages, resp.Matches...)
 		pageMax = resp.PageCount
 		params.Page++
+		bar.Add(1)
 	}
+	bar.Finish()
+	fmt.Println()
 	var userMessages []slack.SearchMessage
 	for _, m := range messages {
-		if m.User == t.UserID {
+		if m.User == state.UserID {
 			userMessages = append(userMessages, m)
 		}
 	}
-	t.UserMessages = userMessages
+	state.UserMessages = userMessages
 	return nil
 }
 
-func (t *Team) fetchFiles() error {
-	first := true
-	var files []slack.File
+func fetchFiles() error {
 	params := slack.NewGetFilesParameters()
-	params.Page = 1
-	params.User = t.UserID
-	params.Channel = t.ChannelID
+	params.User = state.UserID
+	params.Channel = state.ChannelID
+	<-rateLimitTier3
+	files, paging, err := state.RTM.GetFiles(params)
+	if err != nil {
+		return err
+	}
 	pageMax := 1
-	for first || params.Page <= pageMax {
-		first = false
+	if paging != nil {
+		pageMax = paging.Pages
+	}
+	params.Page++
+	bar := progressbar.NewOptions(pageMax, progressbar.OptionSetDescription("fetching files"))
+	bar.Add(1)
+	for params.Page <= pageMax {
 		<-rateLimitTier3
-		filesPage, paging, err := t.RTM.GetFiles(params)
+		filesPage, paging, err := state.RTM.GetFiles(params)
 		if err != nil {
 			return err
 		}
@@ -224,41 +225,46 @@ func (t *Team) fetchFiles() error {
 			pageMax = paging.Pages
 		}
 		params.Page++
+		bar.Add(1)
 	}
-	t.UserFiles = files
+	bar.Finish()
+	fmt.Println()
+	state.UserFiles = files
 	return nil
 }
 
-func (t *Team) wipeUserMessages() error {
+func wipeUserMessages() error {
 	var errors []error
-	bar := progressbar.New(len(t.UserMessages))
+	bar := progressbar.NewOptions(len(state.UserMessages), progressbar.OptionSetDescription("wiping messages"))
 	bar.RenderBlank()
-	for _, m := range t.UserMessages {
+	for _, m := range state.UserMessages {
 		bar.Add(1)
 		<-rateLimitTier3
-		if _, _, err := t.RTM.DeleteMessage(t.ChannelID, m.Timestamp); err != nil {
+		if _, _, err := state.RTM.DeleteMessage(state.ChannelID, m.Timestamp); err != nil {
 			errors = append(errors, err)
 		}
 	}
-	bar.Clear()
+	bar.Finish()
+	fmt.Println()
 	if len(errors) > 0 {
 		return fmt.Errorf("%d errors (e.g. %v)", len(errors), errors[0])
 	}
 	return nil
 }
 
-func (t *Team) wipeUserFiles() error {
+func wipeUserFiles() error {
 	var errors []error
-	bar := progressbar.New(len(t.UserFiles))
+	bar := progressbar.NewOptions(len(state.UserFiles), progressbar.OptionSetDescription("wiping files"))
 	bar.RenderBlank()
-	for _, f := range t.UserFiles {
+	for _, f := range state.UserFiles {
 		bar.Add(1)
 		<-rateLimitTier3
-		if err := t.RTM.DeleteFile(f.ID); err != nil {
+		if err := state.RTM.DeleteFile(f.ID); err != nil {
 			errors = append(errors, err)
 		}
 	}
-	bar.Clear()
+	bar.Finish()
+	fmt.Println()
 	if len(errors) > 0 {
 		return fmt.Errorf("%d errors (e.g. %v)", len(errors), errors[0])
 	}
