@@ -20,7 +20,6 @@ import (
 
 var config struct {
 	Channel      string
-	UserID       string
 	Token        string
 	WipeMessages bool
 	WipeFiles    bool
@@ -48,7 +47,6 @@ func init() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.Ldate | log.Ltime)
 	flag.StringVar(&config.Channel, "channel", "", "channel name (without '#')")
-	flag.StringVar(&config.UserID, "dm", "", "user ID (without '@')")
 	flag.StringVar(&config.Token, "token", "", "API token")
 	flag.StringVar(&config.Path, "config", "slack-wipe.json", "")
 	flag.BoolVar(&config.WipeMessages, "messages", false, "wipe messages")
@@ -65,8 +63,8 @@ func init() {
 		}
 	}
 
-	if config.Channel == "" && config.UserID == "" {
-		log.Fatalf("-channel or -dm is required")
+	if config.Channel == "" {
+		log.Fatalf("-channel is required")
 	}
 	if config.Token == "" {
 		log.Fatalf("-token is required")
@@ -77,17 +75,9 @@ func main() {
 	state.API = slack.New(config.Token)
 	state.RTM = state.API.NewRTM()
 	go state.RTM.ManageConnection()
-	if config.UserID != "" {
-		log.Printf("looking up channel ID for %q", config.UserID)
-		if err := channelIDForUserID(config.UserID); err != nil {
-			log.Fatalf("fetch channel info for dm with %q: %v", config.UserID, err)
-		}
-	}
-	if config.Channel != "" {
-		log.Printf("looking up channel ID for %q", config.Channel)
-		if err := channelIDForChannelName(config.Channel); err != nil {
-			log.Fatalf("fetch channel info for channel %q: %v", config.Channel, err)
-		}
+	log.Printf("looking up channel ID for %q", config.Channel)
+	if err := channelIDForChannelName(config.Channel); err != nil {
+		log.Fatalf("fetch channel info for channel %q: %v", config.Channel, err)
 	}
 	log.Printf("channel ID: %s", state.ChannelID)
 	log.Printf("looking up user for token %s...%s", config.Token[:8], config.Token[len(config.Token)-9:])
@@ -178,35 +168,6 @@ func channelIDForChannelName(channelName string) error {
 		}
 	}
 	return fmt.Errorf("channel not found: %q", channelName)
-}
-
-func channelIDForUserID(userID string) error {
-	var channels []slack.Channel
-	first := true
-	cursor := ""
-	for first || cursor != "" {
-		first = false
-		<-rateLimitTier2
-		moreChannels, nextCursor, err := state.RTM.GetConversations(&slack.GetConversationsParameters{
-			Cursor:          cursor,
-			Types:           []string{"private_channel", "public_channel", "mpim", "im"},
-			ExcludeArchived: "false",
-			Limit:           1000,
-		})
-		if err != nil {
-			return err
-		}
-		channels = append(channels, moreChannels...)
-		cursor = nextCursor
-	}
-	for _, c := range channels {
-		if c.IsIM && c.User == userID {
-			state.ChannelID = c.ID
-			config.Channel = c.Name
-			return nil
-		}
-	}
-	return fmt.Errorf("dm not found: %q", userID)
 }
 
 func fetchUserInfo() error {
