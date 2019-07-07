@@ -2,11 +2,11 @@
 
 Deletes all your messages and/or files in a single Slack channel.
 
-Alternatively, if you specify `-redact` mode, it edits all messages, replacing all non-space characters with `█`:
+Alternatively, if you specify `-redact` mode, it edits all messages, replacing all non-(space-or-punctuaton) characters with `█`:
 
 ```text
-redact mode test
-██████ ████ ████
+redact mode test!?
+██████ ████ ████!?
 ```
 
 
