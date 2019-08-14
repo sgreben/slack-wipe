@@ -12,9 +12,14 @@ redact mode test!?
 
 ## Usage
 
-```sh
-$ slack-wipe -token=API_TOKEN -channel=CHANNEL_NAME -messages -files
-```
+- Channel
+  ```sh
+  $ slack-wipe -token=API_TOKEN -channel=CHANNEL_NAME -messages -files
+  ```
+- Direct messages
+  ```sh
+  $ slack-wipe -token=API_TOKEN -im=COMMA_SEPARATED_USERNAMES -messages -files
+  ```
 
 ```
 Usage of slack-wipe:
