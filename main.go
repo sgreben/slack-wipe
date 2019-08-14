@@ -27,18 +27,23 @@ var config struct {
 	AutoApprove  bool
 	Redact       bool
 	RedactMarker rune
+	IM           string
 }
 
 var state struct {
 	API          *slack.Client
 	RTM          *slack.RTM
-	ChannelID    string
+	Channel      slack.Channel
 	User         string
 	UserID       string
+	MemberList   []string
+	MemberIDMap  map[string]bool
 	UserMessages []slack.SearchMessage
 	UserFiles    []slack.File
+	Users        map[string]slack.User
 }
 
+var rateLimitTier4 = time.Tick(time.Minute / 100)
 var rateLimitTier3 = time.Tick(time.Minute / 50)
 var rateLimitTier2 = time.Tick(time.Minute / 20)
 
@@ -47,6 +52,7 @@ func init() {
 	log.SetOutput(os.Stderr)
 	log.SetFlags(log.Ldate | log.Ltime)
 	flag.StringVar(&config.Channel, "channel", "", "channel name (without '#')")
+	flag.StringVar(&config.IM, "im", "", "comma-separated list of usernames")
 	flag.StringVar(&config.Token, "token", "", "API token")
 	flag.StringVar(&config.Path, "config", "slack-wipe.json", "")
 	flag.BoolVar(&config.WipeMessages, "messages", false, "wipe messages")
@@ -63,9 +69,10 @@ func init() {
 		}
 	}
 
-	if config.Channel == "" {
-		log.Fatalf("-channel is required")
+	if config.Channel == "" && config.IM == "" {
+		log.Fatalf("-channel or -im is required")
 	}
+	state.MemberList = strings.Split(config.IM, ",")
 	if config.Token == "" {
 		log.Fatalf("-token is required")
 	}
@@ -75,16 +82,34 @@ func main() {
 	state.API = slack.New(config.Token)
 	state.RTM = state.API.NewRTM()
 	go state.RTM.ManageConnection()
-	log.Printf("looking up channel ID for %q", config.Channel)
-	if err := channelIDForChannelName(config.Channel); err != nil {
-		log.Fatalf("fetch channel info for channel %q: %v", config.Channel, err)
-	}
-	log.Printf("channel ID: %s", state.ChannelID)
 	log.Printf("looking up user for token %s...%s", config.Token[:8], config.Token[len(config.Token)-9:])
 	if err := fetchUserInfo(); err != nil {
 		log.Fatalf("fetch user info: %v", err)
 	}
 	log.Printf("user: @%s (@%s)", state.User, state.UserID)
+	switch {
+	case config.IM != "":
+		log.Print("fetching users")
+		if err := fetchUsers(); err != nil {
+			log.Fatalf("fetch users: %v", err)
+		}
+		state.MemberIDMap = make(map[string]bool, len(state.MemberList))
+		state.MemberIDMap[state.UserID] = true
+		for _, m := range state.MemberList {
+			m = strings.TrimPrefix(m, "@")
+			state.MemberIDMap[state.Users[m].ID] = true
+		}
+		log.Printf("looking up channel ID for IM with %v", state.MemberList)
+		if err := channelForIM(); err != nil {
+			log.Fatalf("fetch channel info for conversation %q: %v", config.IM, err)
+		}
+	default:
+		log.Printf("looking up channel ID for %q", config.Channel)
+		if err := channelForChannelName(config.Channel); err != nil {
+			log.Fatalf("fetch channel info for channel %q: %v", config.Channel, err)
+		}
+	}
+	log.Printf("channel: %s (%s)", state.Channel.Name, state.Channel.ID)
 	if config.WipeMessages {
 		fetchAndWipeMessages()
 	}
@@ -98,8 +123,15 @@ func fetchAndWipeMessages() {
 	if config.Redact {
 		verb = "redact"
 	}
-	if err := fetchMessages(); err != nil {
-		log.Fatalf("fetch messages for channel %q: %v", config.Channel, err)
+	switch {
+	case state.Channel.IsMpIM || state.Channel.IsIM:
+		if err := fetchDirectMessages(); err != nil {
+			log.Fatalf("fetch messages for conversation %q: %v", state.Channel.Name, err)
+		}
+	default:
+		if err := fetchMessages(); err != nil {
+			log.Fatalf("fetch messages for channel %q: %v", state.Channel.Name, err)
+		}
 	}
 	if !config.AutoApprove {
 		if !approvalPrompt(fmt.Sprintf("%s all %d messages?", verb, len(state.UserMessages))) {
@@ -119,7 +151,7 @@ func fetchAndWipeMessages() {
 
 func fetchAndWipeFiles() {
 	if err := fetchFiles(); err != nil {
-		log.Fatalf("fetch files for channel %q: %v", config.Channel, err)
+		log.Fatalf("fetch files for channel %q: %v", state.Channel.Name, err)
 	}
 	if !config.AutoApprove {
 		if !approvalPrompt(fmt.Sprintf("wipe all %d files?", len(state.UserFiles))) {
@@ -142,7 +174,7 @@ func approvalPrompt(prompt string) bool {
 	return answer == "yes"
 }
 
-func channelIDForChannelName(channelName string) error {
+func channelForIM() error {
 	var channels []slack.Channel
 	first := true
 	cursor := ""
@@ -151,7 +183,76 @@ func channelIDForChannelName(channelName string) error {
 		<-rateLimitTier2
 		moreChannels, nextCursor, err := state.RTM.GetConversations(&slack.GetConversationsParameters{
 			Cursor:          cursor,
-			Types:           []string{"private_channel", "public_channel", "mpim", "im"},
+			Types:           []string{"mpim", "im"},
+			ExcludeArchived: "false",
+			Limit:           1000,
+		})
+		if err != nil {
+			return err
+		}
+		channels = append(channels, moreChannels...)
+		cursor = nextCursor
+	}
+channels:
+	for _, c := range channels {
+		switch {
+		case c.IsIM && len(state.MemberIDMap) == 2 && state.MemberIDMap[c.User]:
+			state.Channel = c
+			state.Channel.Name = fmt.Sprintf("IM with %v", state.MemberList)
+			return nil
+		case c.IsMpIM && len(state.MemberIDMap) > 2:
+			members, err := usersInConversation(c.ID)
+			if err != nil {
+				return fmt.Errorf("fetch conversation members: %v", err)
+			}
+			if len(members) != len(state.MemberIDMap) {
+				continue
+			}
+			for _, m := range members {
+				if !state.MemberIDMap[m] {
+					continue channels
+				}
+			}
+			state.Channel = c
+			return nil
+		}
+	}
+	return fmt.Errorf("conversation not found: %q", config.IM)
+}
+
+func usersInConversation(channelID string) ([]string, error) {
+	params := &slack.GetUsersInConversationParameters{
+		ChannelID: channelID,
+	}
+	var users []string
+	<-rateLimitTier4
+	moreUsers, nextCursor, err := state.RTM.GetUsersInConversation(params)
+	if err != nil {
+		return nil, err
+	}
+	users = append(users, moreUsers...)
+	for nextCursor != "" {
+		params.Cursor = nextCursor
+		<-rateLimitTier4
+		moreUsers, nextCursor, err = state.RTM.GetUsersInConversation(params)
+		if err != nil {
+			return nil, err
+		}
+		users = append(users, moreUsers...)
+	}
+	return users, nil
+}
+
+func channelForChannelName(channelName string) error {
+	var channels []slack.Channel
+	first := true
+	cursor := ""
+	for first || cursor != "" {
+		first = false
+		<-rateLimitTier2
+		moreChannels, nextCursor, err := state.RTM.GetConversations(&slack.GetConversationsParameters{
+			Cursor:          cursor,
+			Types:           []string{"private_channel", "public_channel"},
 			ExcludeArchived: "false",
 			Limit:           1000,
 		})
@@ -162,8 +263,9 @@ func channelIDForChannelName(channelName string) error {
 		cursor = nextCursor
 	}
 	for _, c := range channels {
-		if c.Name == channelName {
-			state.ChannelID = c.ID
+		switch {
+		case c.Name == channelName:
+			state.Channel = c
 			return nil
 		}
 	}
@@ -178,6 +280,57 @@ func fetchUserInfo() error {
 	}
 	state.User = identity.User
 	state.UserID = identity.UserID
+	return nil
+}
+
+func fetchUsers() error {
+	users, err := state.RTM.GetUsers()
+	if err != nil {
+		return err
+	}
+	state.Users = make(map[string]slack.User, len(users))
+	for _, u := range users {
+		state.Users[u.Profile.DisplayName] = u
+	}
+	return nil
+}
+
+func fetchDirectMessages() error {
+	params := &slack.GetConversationHistoryParameters{
+		ChannelID: state.Channel.ID,
+	}
+	<-rateLimitTier2
+	hist, err := state.RTM.GetConversationHistory(params)
+	if err != nil {
+		return err
+	}
+	var userMessages []slack.SearchMessage
+	for {
+		for _, m := range hist.Messages {
+			if m.User == state.UserID {
+				userMessages = append(userMessages, slack.SearchMessage{
+					Type:        m.Type,
+					Channel:     slack.CtxChannel{ID: state.Channel.ID, Name: state.Channel.Name},
+					User:        m.User,
+					Username:    m.Username,
+					Timestamp:   m.Timestamp,
+					Text:        m.Text,
+					Attachments: m.Attachments,
+				})
+			}
+		}
+		nextCursor := hist.ResponseMetaData.NextCursor
+		if nextCursor == "" || !hist.HasMore {
+			break
+		}
+		params.Cursor = nextCursor
+		<-rateLimitTier2
+		hist, err = state.RTM.GetConversationHistory(params)
+		if err != nil {
+			return err
+		}
+	}
+	state.UserMessages = userMessages
 	return nil
 }
 
@@ -222,7 +375,7 @@ func fetchFiles() error {
 	params := slack.NewGetFilesParameters()
 	params.Count = 200
 	params.User = state.UserID
-	params.Channel = state.ChannelID
+	params.Channel = state.Channel.ID
 	<-rateLimitTier3
 	files, paging, err := state.RTM.GetFiles(params)
 	if err != nil {
@@ -266,7 +419,7 @@ func deleteAllUserMessages() error {
 			defer wg.Done()
 			defer bar.Add(1)
 			<-rateLimitTier3
-			if _, _, err := state.RTM.DeleteMessage(state.ChannelID, timestamp); err != nil {
+			if _, _, err := state.RTM.DeleteMessage(state.Channel.ID, timestamp); err != nil {
 				errors = append(errors, err)
 			}
 		}()
@@ -312,7 +465,7 @@ func redactAllUserMessages() error {
 			defer wg.Done()
 			defer bar.Add(1)
 			<-rateLimitTier3
-			if _, _, _, err := state.RTM.UpdateMessage(state.ChannelID, timestamp, redacted); err != nil {
+			if _, _, _, err := state.RTM.UpdateMessage(state.Channel.ID, timestamp, redacted); err != nil {
 				errors = append(errors, err)
 			}
 		}()
