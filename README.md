@@ -22,6 +22,8 @@ Usage of slack-wipe:
         API token
   -channel string
         channel name (without '#')
+  -im string
+        comma-separated list of usernames
   -messages
         wipe messages (default false)
   -files
