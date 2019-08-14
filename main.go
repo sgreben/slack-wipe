@@ -96,6 +96,7 @@ func main() {
 		state.MemberIDMap = make(map[string]bool, len(state.MemberList))
 		state.MemberIDMap[state.UserID] = true
 		for _, m := range state.MemberList {
+			m = strings.TrimSpace(m)
 			m = strings.TrimPrefix(m, "@")
 			state.MemberIDMap[state.Users[m].ID] = true
 		}
